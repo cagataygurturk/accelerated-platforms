@@ -156,6 +156,10 @@ output "ira_online_gpu_diffusers_flux_image_url" {
   value = local.ira_online_gpu_diffusers_flux_image_url
 }
 
+output "ira_online_gpu_diffusers_sglang_diffusers_image_url" {
+  value = local.ira_online_gpu_diffusers_sglang_diffusers_image_url
+}
+
 output "ira_online_gpu_kubernetes_namespace_name" {
   value = local.ira_online_gpu_kubernetes_namespace_name
 }
@@ -239,4 +243,3 @@ output "workflow_api_service_account_oauth_display_name" {
 output "workflow_api_service_account_project_id" {
   value = local.workflow_api_service_account_project_id
 }
-
