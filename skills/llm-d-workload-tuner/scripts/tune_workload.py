@@ -50,12 +50,12 @@ MODEL_SPECS = {
 def parse_args():
     parser = argparse.ArgumentParser(description="LLM-D Workload Configuration Tuner")
     parser.add_argument(
-        "--config", required=True, help="Path to config.json workload specifications"
+        "--config", required=False, help="Path to config.json workload specifications"
     )
     parser.add_argument(
         "--perf-yaml",
         required=True,
-        help="Path to inference-perf.yaml benchmark stages",
+        help="Path to inference-perf.yaml benchmark stages or full workload profile YAML",
     )
     parser.add_argument(
         "--gpu-type",
@@ -68,6 +68,11 @@ def parse_args():
         help="Routing strategy directory sub-name",
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help="Model name override (e.g. google/gemma-4-31b-it)",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Apply updates directly to the kustomize overlay files",
@@ -78,7 +83,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    if not os.path.exists(args.config):
+    if args.config and not os.path.exists(args.config):
         print(f"Error: Config file not found: {args.config}", file=sys.stderr)
         sys.exit(1)
 
@@ -87,14 +92,16 @@ def main():
         sys.exit(1)
 
     # 1. Parse Workload Specifications
-    with open(args.config, "r") as f:
-        config_data = json.load(f)
-
     with open(args.perf_yaml, "r") as f:
         perf_data = yaml.safe_load(f)
 
-    # Get max output sequence length
-    max_output_len = config_data.get("output_sequence_length", {}).get("max", 2048)
+    if args.config:
+        with open(args.config, "r") as f:
+            config_data = json.load(f)
+        max_output_len = config_data.get("output_sequence_length", {}).get("max", 2048)
+    else:
+        # Try to parse from perf-yaml (assuming it's a full workload profile)
+        max_output_len = perf_data.get("data", {}).get("output_distribution", {}).get("max", 2048)
 
     # Get max concurrency level from stages
     max_concurrency = 1
@@ -103,8 +110,8 @@ def main():
         if concurrency > max_concurrency:
             max_concurrency = concurrency
 
-    # Get target model from perf-yaml
-    model_id = perf_data.get("server", {}).get("model_name", "google/gemma-4-31b-it")
+    # Get target model from perf-yaml or override
+    model_id = args.model or perf_data.get("server", {}).get("model_name", "google/gemma-4-31b-it")
 
     # 2. Get Model and GPU Specifications
     model_spec = MODEL_SPECS.get(model_id)

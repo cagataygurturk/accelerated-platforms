@@ -1,10 +1,10 @@
 [
   {
     "id": 1,
-    "prompt": "Tune configuration parameters for google/gemma-4-31b-it on rtx-pro-6000 using the precise-prefix-cache-routing strategy and the workload config in skills/llm-d-interactive-chat/config.json. Apply the changes.",
+    "prompt": "Tune configuration parameters for google/gemma-4-31b-it on rtx-pro-6000 using the precise-prefix-cache-routing strategy. Apply the changes.",
     "expected_output": "Parses the profile, calculates the required VRAM size, recommends the appropriate TP size (TENSOR_PARALLEL_SIZE=2), and updates the GKE Kustomize patch yaml files and runtime.env file under the target rtx-pro-6000-gemma-4-31b-it overlay.",
     "assertions": [
-      "The tune_workload.py script is invoked with --config skills/llm-d-interactive-chat/config.json and --perf-yaml skills/llm-d-interactive-chat/inference-perf.yaml",
+      "The tune_workload.py script is invoked with --perf-yaml",
       "Recommended TENSOR_PARALLEL_SIZE is calculated and printed",
       "The overlay files (runtime.env, patch-resources.yaml, and patch-nodeselector.yaml) are updated under the target rtx-pro-6000-gemma-4-31b-it overlay directory"
     ]

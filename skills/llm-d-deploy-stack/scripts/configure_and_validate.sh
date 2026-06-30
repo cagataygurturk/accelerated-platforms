@@ -56,6 +56,17 @@ case "$MODEL" in
     *) SUFFIX="custom" ;;
 esac
 
+if [ "$PREFIX" = "unknown" ]; then
+    echo "ERROR: Unsupported accelerator: $ACCELERATOR. Allowed accelerators are: h100, rtx-pro-6000, v6e." >&2
+    exit 1
+fi
+
+if [ "$SUFFIX" = "custom" ]; then
+    echo "ERROR: Unsupported model: $MODEL. Allowed models are: google/gemma-4-31b-it, qwen/qwen3-32b." >&2
+    exit 1
+fi
+
+
 # Resolve overlay path based on platform and deployment strategy
 if [ "$PREFIX" = "v6e" ]; then
     # In GKE base reference implementation, TPU overlays use strategy folder overlays
