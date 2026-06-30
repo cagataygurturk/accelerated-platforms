@@ -1,6 +1,6 @@
 ---
 name: llm-d-benchmarking
-description: Benchmarks a deployed llm-d well-lit path guide stack on GKE using llm-d-benchmark cli with infernece-perf as the harness, the user a will select the appropriate  workload profiles from llm-d-benchmark. 
+description: Benchmarks a deployed llm-d well-lit path guide stack on GKE using llm-d-benchmark cli with inference-perf as the harness, the user a will select the appropriate  workload profiles from llm-d-benchmark. 
 version: 0.1.0
 allowed-tools: python3 kubectl gcloud
 mcp-servers: []
@@ -27,7 +27,7 @@ Follow these instructions to run benchmarks against a deployed llm-d stack.
   ```
   _Note: The `run_benchmark.sh` script assumes `llm-d` CLI is installed and available in the path._
 - The llm-d stack must be GKE deployed and running.
-- Determine the inference endpoint URL and the gateway class (e.g. `epponly` or `istio`).
+- Determine the inference endpoint URL and the gateway class (e.g. `epp-only` or `istio`).
   - Refer to [Deploy Stack Skill](file:///usr/local/google/home/syedaanjum/Documents/accelerated-platforms/skills/llm-d-deploy-stack/SKILL.MD) for details.
 
 ## 2. Select a Workload Profile

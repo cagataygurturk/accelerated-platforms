@@ -1,6 +1,6 @@
 ---
 name: llm-d-workload-tuner
-description: Automatically tunes GKE inference server parameters and resources based on workload profiles.
+description: This is an experimental Skill. It automatically tunes GKE vLLM inference server parameters and resources based on workload profiles specified in the benchmark configs.
 version: 0.1.0
 allowed-tools: python3 kubectl yaml json
 mcp-servers: []
