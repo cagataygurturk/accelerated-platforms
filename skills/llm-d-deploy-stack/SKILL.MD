@@ -1,6 +1,6 @@
 ---
 name: llm-d-deploy-stack
-description: Deploys the llm-d benchmarking stack on GKE using well-lit paths.
+description: Deploys the llm-d stack on GKE using well-lit paths specification.
 version: 0.3.1
 allowed-tools: kubectl gcloud helm kustomize curl cat terraform python3
 mcp-servers:

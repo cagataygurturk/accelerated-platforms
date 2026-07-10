@@ -69,7 +69,8 @@ if [ -n "$MOCK_LOG_FILE" ]; then
     echo '{"mock_vllm_args": ["--model", "google/gemma-4-31b-it"]}' > ./vllm_config.json
     echo '{}' > ./dcgm_metrics.json
     echo -e "treatment,source_file,ttft_mean_s\ndefault,report_v0.2.json,0.5" > output.csv
-    gcloud storage cp report_v0.2.json vllm_config.json dcgm_metrics.json output.csv gs://${RESULTS_BUCKET}/
+    GCS_DIR_NAME="mock-run-$(date -u +%Y%m%d-%H%M%S)"
+    gcloud storage cp report_v0.2.json vllm_config.json dcgm_metrics.json output.csv gs://${RESULTS_BUCKET}/${GCS_DIR_NAME}/
     exit 0
 fi
 
@@ -87,7 +88,7 @@ collect_dcgm() {
 
 # Phase 1: Setup Namespace & PVC
 llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" $WORKLOAD_ARG --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --workspace "$WORKSPACE_DIR" --dry-run
-llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" $WORKLOAD_ARG --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --workspace "$WORKSPACE_DIR" -s 0-6
+llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" $WORKLOAD_ARG --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --workspace "$WORKSPACE_DIR" -s 0,1
 kubectl delete pod access-to-harness-data-workload-pvc -n "$NAMESPACE" --ignore-not-found --grace-period=0 --force
 
 # Phase 2: Execute Benchmark Harness
@@ -99,7 +100,7 @@ collect_dcgm "$NAMESPACE" "$BENCHMARK_START_TIME" "$BENCHMARK_END_TIME"
 # Phase 3: Result Retrieval & Cleanup
 kubectl apply -n "$NAMESPACE" -f skills/llm-d-benchmarking/scripts/helper-pods/data-access.yaml
 kubectl wait --for=condition=Ready pod/access-to-harness-data-workload-pvc -n "$NAMESPACE" --timeout=120s
-llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" -s 8-11 --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --harness inference-perf --workspace "$WORKSPACE_DIR"
+llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" -s 8 --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --harness inference-perf --workspace "$WORKSPACE_DIR"
 
 # Phase 4: Report Generation & Archival
 RESULTS_DIR=$(ls -td "$WORKSPACE_DIR"/*/results/inference-perf-* 2>/dev/null | head -n 1 || true)
@@ -107,8 +108,11 @@ RESULTS_DIR=$(ls -td "$WORKSPACE_DIR"/*/results/inference-perf-* 2>/dev/null | h
 cp "$RESULTS_DIR/summary_lifecycle_metrics.json" ./results.json
 python3 -c "from llmdbenchmark.analysis.benchmark_report.native_to_br0_2 import import_inference_perf; import_inference_perf('./results.json').export_json('./report_v0.2.json')"
 python3 "${REPO_DIR}/skills/llm-d-benchmarking/scripts/extract_csv.py" --input report_v0.2.json --output output.csv
-kubectl get $(kubectl get deployment -n "$NAMESPACE" -l app=vllm -o name | head -n 1) -n "$NAMESPACE" -o json > ./vllm_config.json 2>/dev/null || echo '{"error": "not found"}' > ./vllm_config.json
+kubectl get $(kubectl get deployment -n "$NAMESPACE" -o name | grep -i 'vllm' | head -n 1) -n "$NAMESPACE" -o json > ./vllm_config.json 2>/dev/null || echo '{"error": "not found"}' > ./vllm_config.json
 cp report_v0.2.json output.csv vllm_config.json "$RESULTS_DIR/"
-gcloud storage cp report_v0.2.json vllm_config.json output.csv gs://${RESULTS_BUCKET}/
-[ -f "$RESULTS_DIR/dcgm_metrics.json" ] && cp "$RESULTS_DIR/dcgm_metrics.json" ./dcgm_metrics.json && gcloud storage cp dcgm_metrics.json gs://${RESULTS_BUCKET}/
+[ -f "./dcgm_metrics.json" ] && cp "./dcgm_metrics.json" "$RESULTS_DIR/"
+
+GCS_DIR_NAME=$(basename "$WORKSPACE_DIR")
+gcloud storage cp -r "$RESULTS_DIR/"* gs://${RESULTS_BUCKET}/${GCS_DIR_NAME}/
+
 kubectl delete pod access-to-harness-data-workload-pvc -n "$NAMESPACE" --ignore-not-found --grace-period=0 --force

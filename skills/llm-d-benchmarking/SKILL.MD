@@ -207,16 +207,16 @@ Monitor these GKE system metrics for TPU runs (e.g., TPU v5e, v6e):
 You should tear down the serving stack to release cluster resources only when you are done with all the benchmarks.
 
 1. **Ask the user**: "Do you want to tear down the deployed serving stack? This will delete the vLLM server, gateway, and routing resources. (yes/no)"
-2. **If yes**, run the upstream `teardown` subcommand:
-
-   ```bash
-   # Sibling resolution fallback for base-dir
-   export LLMDBENCH_BASE_DIR="${LLMDBENCH_BASE_DIR:-$(cd "${ACP_REPO_DIR}/.." && pwd)/llm-d-benchmark}"
-
-   llmdbenchmark teardown \
-     --base-dir "$LLMDBENCH_BASE_DIR" \
-     --spec "guides/<spec_name>" \
-     --namespace <namespace> \
-     --model <model_name> \
-     --deep
-   ```
+2. **If yes**, run the official teardown script corresponding to the chosen guide:
+   - For `optimized-baseline`:
+     ```bash
+     "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/teardown-llmd-optimized-baseline.sh"
+     ```
+   - For `precise-prefix-cache-routing`:
+     ```bash
+     "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/teardown-llmd-precise-prefix-cache-routing.sh"
+     ```
+   - For `predicted-latency-routing`:
+     ```bash
+     "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/teardown-llmd-predicted-latency-routing.sh"
+     ```
