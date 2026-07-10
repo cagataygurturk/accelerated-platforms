@@ -27,4 +27,4 @@ spec:
       limits:
         cpu: 100m
         memory: 128Mi
-    command: ["curl", "-s", "-w", "\nHTTP Code: %{http_code}\n", "http://REPLACE_ENDPOINT_IP:80/v1/models"]
+    command: ["curl", "-s", "-w", "\nHTTP Code: %{http_code}\n", "REPLACE_ENDPOINT_URL/v1/models"]

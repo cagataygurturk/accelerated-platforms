@@ -4,41 +4,31 @@
 
 set -eo pipefail
 
-NAMESPACE=${1}
-GATEWAY_NAME="llm-d-inference-gateway"
+ENDPOINT_URL=${1}
+NAMESPACE=${2:-"default"}
 
-# 1. Resolve Gateway IP Address dynamically
-echo "Resolving IP address for Gateway '${GATEWAY_NAME}' in namespace '${NAMESPACE}'..."
-GATEWAY_IP=$(kubectl get gateway "${GATEWAY_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)
-
-if [ -z "${GATEWAY_IP}" ]; then
-  echo "Warning: Gateway resource not found or lacks programmed IP. Falling back to default ClusterIP service..."
-  # Try EPP router ClusterIP service
-  GATEWAY_IP=$(kubectl get svc precise-prefix-cache-routing-epp -n "${NAMESPACE}" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
-fi
-
-if [ -z "${GATEWAY_IP}" ]; then
-  echo "Error: Could not resolve Gateway IP or fallback service IP."
+if [ -z "${ENDPOINT_URL}" ]; then
+  echo "Usage: $0 <endpoint_url> [namespace]"
+  echo "Example: $0 http://vllm-service:8000 default"
   exit 1
 fi
 
-echo "Resolved Endpoint IP: ${GATEWAY_IP}"
+echo "Testing Endpoint URL: ${ENDPOINT_URL}"
 
-# 2. Deploy temporary smoke-test pod using resolved IP
+# 1. Deploy temporary smoke-test pod
 echo "Launching model-smoke-test pod..."
 SCRIPT_DIR=$(dirname "$0")
-sed "s/REPLACE_ENDPOINT_IP/${GATEWAY_IP}/g" "${SCRIPT_DIR}/smoke-test.yaml" | kubectl apply -n "${NAMESPACE}" -f -
+sed "s,REPLACE_ENDPOINT_URL,${ENDPOINT_URL},g" "${SCRIPT_DIR}/smoke-test.yaml" | kubectl apply -n "${NAMESPACE}" -f -
 
-
-# 3. Wait for pod execution to complete
+# 2. Wait for pod execution to complete
 echo "Waiting for pod model-smoke-test to complete..."
-kubectl wait --for=condition=Ready pod/model-smoke-test -n "${NAMESPACE}" --timeout=60s >/dev/null
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/model-smoke-test -n "${NAMESPACE}" --timeout=60s >/dev/null || true
 
-# 4. Fetch logs and status
+# 3. Fetch logs and status
 echo "Fetching endpoint response..."
 kubectl logs pod/model-smoke-test -n "${NAMESPACE}"
 
-# 5. Clean up pod
+# 4. Clean up pod
 echo "Cleaning up smoke-test pod..."
-kubectl delete pod model-smoke-test -n "${NAMESPACE}" >/dev/null
+kubectl delete pod model-smoke-test -n "${NAMESPACE}" --ignore-not-found --grace-period=0 --force >/dev/null
 echo "Smoke test helper complete!"

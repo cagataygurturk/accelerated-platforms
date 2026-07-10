@@ -20,453 +20,194 @@ import sys
 
 import yaml
 
-# Define hardware capacities (in GB)
-ACCELERATOR_CAPACITIES = {
-    "h100": 80.0,
-    "h200": 141.0,
-    "nvidia-h100": 80.0,
-    "nvidia-h200": 141.0,
-    "rtx-pro-6000": 96.0,
-    "v6e": 32.0,
-}
-
-# Sizing calculation constants
-DEFAULT_GPU_MEMORY_UTILIZATION = 0.95
-MEM_OVERHEAD_MULTIPLIER = 1.2
-BYTES_PER_PARAM_BF16 = 2.0
-BYTES_PER_PARAM_FP8 = 1.0
-BYTES_PER_ELEMENT_BF16 = 2
+AC = {"h100": 80.0, "h200": 141.0, "rtx-pro-6000": 96.0, "v6e": 32.0}
+DEFAULT_ACCEL_UTIL, MEM_MULT, BYTES_BF16 = 0.95, 1.2, 2.0
+MODELS = {"google/gemma-4-31b-it": (32.0, 48, 8, 256, "gemma-4-31b-it")}
 
 
-def get_nested(d, keys):
-    for k in keys:
-        if not isinstance(d, dict) and not isinstance(d, list):
-            return None
+def ld_env(p):
+    return (
+        dict(l.strip().split("=", 1) for l in open(p) if "=" in l)
+        if os.path.exists(p)
+        else {}
+    )
+
+
+def sv_env(p, d):
+    open(p, "w").writelines(f"{k}={v}\n" for k, v in d.items())
+
+
+def patch_yaml(p, ks, v):
+    if not os.path.exists(p):
+        return
+    with open(p) as f:
+        d = yaml.safe_load(f)
+    c = d
+    for i, k in enumerate(ks[:-1]):
+        if isinstance(c, list):
+            c = c[k]
+        elif isinstance(c, dict):
+            c = c.setdefault(k, {} if isinstance(ks[i + 1], str) else [])
+    c[ks[-1]] = v
+    with open(p, "w") as f:
+        yaml.dump(d, f, default_flow_style=False)
+
+
+def get_n(d, ks, df="unknown"):
+    for k in ks:
         try:
             d = d[k]
         except (KeyError, IndexError, TypeError):
-            return None
+            return df
     return d
 
 
-def set_nested(d, keys, value):
-    for k in keys[:-1]:
-        if isinstance(d, dict):
-            d = d.setdefault(k, {})
-        elif isinstance(d, list) and isinstance(k, int) and k < len(d):
-            d = d[k]
-        else:
-            return False
-    try:
-        d[keys[-1]] = value
-        return True
-    except (KeyError, IndexError, TypeError):
-        return False
-
-
-# Define model specifications
-MODEL_SPECS = {
-    "google/gemma-4-31b-it": {
-        "parameters": 32.0,  # in Billions
-        "layers": 48,
-        "kv_heads": 8,
-        "head_dim": 256,
-        "suffix": "gemma-4-31b-it",
-    },
-    "qwen/qwen3-32b": {
-        "parameters": 32.5,
-        "layers": 64,
-        "kv_heads": 8,
-        "head_dim": 128,
-        "suffix": "qwen3-32b",
-    },
-}
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="LLM-D Workload Configuration Tuner")
-    parser.add_argument(
-        "--config", required=False, help="Path to config.json workload specifications"
-    )
-    parser.add_argument(
-        "--perf-yaml",
-        required=True,
-        help="Path to inference-perf.yaml benchmark stages or full workload profile YAML",
-    )
-    parser.add_argument(
-        "--accelerator-type",
-        required=True,
-        help="Accelerator type (e.g. rtx-pro-6000, nvidia-h100, nvidia-h200, v6e)",
-    )
-    parser.add_argument(
-        "--strategy",
-        required=True,
-        help="Target GKE routing strategy overlay (e.g. optimized-baseline, precise-prefix-cache-routing, predicted-latency-routing)",
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help="Model name override (e.g. google/gemma-4-31b-it)",
-    )
-    parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Apply updates directly to the kustomize overlay files",
-    )
-    parser.add_argument(
-        "--chunked-prefill-threshold",
-        type=int,
-        default=8000,
-        help="Token threshold above which chunked prefill is enabled (default: 8000)",
-    )
-    return parser.parse_args()
-
-
 def main():
-    args = parse_args()
+    p = argparse.ArgumentParser()
+    for a, k in [
+        ("--config", {}),
+        ("--perf-yaml", {"required": True}),
+        ("--accelerator-type", {"required": True, "choices": list(AC.keys())}),
+        ("--spec", {"required": True}),
+        ("--model", {"default": "google/gemma-4-31b-it"}),
+        ("--apply", {"action": "store_true"}),
+        ("--chunked-prefill-threshold", {"type": int, "default": 8000}),
+    ]:
+        p.add_argument(a, **k)
+    args = p.parse_args()
+
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+    specs_f = f"{repo}/skills/llm-d-workload-tuner/references/model_specs.json"
+    if os.path.exists(specs_f):
+        MODELS.update(
+            {
+                k: tuple(v)
+                for k, v in json.load(open(specs_f)).items()
+                if k != "_comment"
+            }
+        )
 
     if args.config and not os.path.exists(args.config):
-        print(f"Error: Config file not found: {args.config}", file=sys.stderr)
-        sys.exit(1)
-
+        sys.exit(f"Err: {args.config}")
     if not os.path.exists(args.perf_yaml):
-        print(f"Error: Perf YAML file not found: {args.perf_yaml}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(f"Err: {args.perf_yaml}")
 
-    # 1. Parse Workload Specifications
-    with open(args.perf_yaml, "r") as f:
-        perf_data = yaml.safe_load(f)
-
-    if args.config:
-        with open(args.config, "r") as f:
-            config_data = json.load(f)
-        max_output_len = config_data.get("output_sequence_length", {}).get("max", 2048)
-    else:
-        # Try to parse from perf-yaml (supports output_distribution or conversation_replay)
-        max_output_len = (
-            perf_data.get("data", {}).get("output_distribution", {}).get("max")
-            or perf_data.get("data", {})
-            .get("conversation_replay", {})
-            .get("output_tokens_per_turn", {})
-            .get("max")
+    perf = yaml.safe_load(open(args.perf_yaml))
+    max_out = (
+        json.load(open(args.config)).get("output_sequence_length", {}).get("max", 2048)
+        if args.config
+        else (
+            get_n(perf, ["data", "output_distribution", "max"], None)
+            or get_n(
+                perf,
+                ["data", "conversation_replay", "output_tokens_per_turn", "max"],
+                None,
+            )
             or 2048
         )
-
-    # Get max concurrency level from stages (supports root-level stages or load.stages)
-    max_concurrency = 1
-    stages = perf_data.get("stages") or perf_data.get("load", {}).get("stages", [])
-    for stage in stages:
-        concurrency = stage.get("concurrency_level", 1)
-        if concurrency > max_concurrency:
-            max_concurrency = concurrency
-
-    # Get target model from perf-yaml or override
-    model_id = args.model or perf_data.get("server", {}).get(
-        "model_name", "google/gemma-4-31b-it"
+    )
+    max_c = max(
+        (
+            s.get("concurrency_level", 1)
+            for s in perf.get("stages") or perf.get("load", {}).get("stages", [])
+        ),
+        default=1,
     )
 
-    # 2. Get Model and Accelerator Specifications
-    model_spec = MODEL_SPECS.get(model_id)
-    if not model_spec:
-        # Fallback default
-        model_spec = MODEL_SPECS["google/gemma-4-31b-it"]
-        print(
-            f"Warning: Model {model_id} specifications not registered. Using default Gemma-4-31B specs."
-        )
-
-    vram_capacity_gb = ACCELERATOR_CAPACITIES.get(args.accelerator_type.lower())
-    if not vram_capacity_gb:
-        print(
-            f"Error: Unsupported accelerator type: {args.accelerator_type}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # 3. Resolve Target Overlay Path and Parse Active Configs
-    platform_prefix = "tpu" if args.accelerator_type.lower() == "v6e" else "gpu"
-    model_suffix = model_spec["suffix"]
-    accel_dir = (
-        f"v6e-{model_suffix}"
-        if platform_prefix == "tpu"
-        else f"{args.accelerator_type.lower()}-{model_suffix}"
+    params, layers, kv, hd, sfx = MODELS.get(
+        args.model, MODELS["google/gemma-4-31b-it"]
     )
+    accel = args.accelerator_type.replace("nvidia-", "")
+    vram = AC.get(accel)
 
-    overlay_path = f"platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-{platform_prefix}/llmd-{args.strategy}/vllm/{accel_dir}"
+    pfx = "tpu" if accel == "v6e" else "gpu"
+    ovl = f"platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-{pfx}/llmd-{args.spec}/vllm/{accel}-{sfx}"
 
-    if not os.path.isdir(overlay_path):
-        print(
-            f"Warning: Target overlay directory not found: {overlay_path}. Cannot compare configurations.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    if not os.path.isdir(ovl):
+        sys.exit(f"Warn: {ovl} not found.")
 
-    # Parse existing runtime.env configurations (to load gpu utilization, etc.)
-    env_file = os.path.join(overlay_path, "runtime.env")
-    old_tp = "unknown"
-    old_mml = "unknown"
-    old_gpu_mem_util = "unknown"
-    old_quant = "unknown"
-    old_extra = "unknown"
-    gpu_memory_utilization = DEFAULT_GPU_MEMORY_UTILIZATION
+    env_f = f"{ovl}/runtime.env"
+    env = ld_env(env_f)
+    accel_util = float(env.get("GPU_MEMORY_UTILIZATION", DEFAULT_ACCEL_UTIL))
+    w_size = params * BYTES_BF16 * MEM_MULT
+    bpt = 4 * layers * kv * hd
+    c_size = (max_c * max_out * bpt) / (1024**3)
 
-    if os.path.exists(env_file):
-        with open(env_file, "r") as f:
-            lines = f.readlines()
-        for line in lines:
-            if line.startswith("TENSOR_PARALLEL_SIZE="):
-                old_tp = line.split("=")[1].strip()
-            elif line.startswith("MAX_MODEL_LEN="):
-                old_mml = line.split("=")[1].strip()
-            elif line.startswith("GPU_MEMORY_UTILIZATION="):
-                old_gpu_mem_util = line.split("=")[1].strip()
-                try:
-                    gpu_memory_utilization = float(old_gpu_mem_util)
-                except ValueError:
-                    pass
-            elif line.startswith("QUANTIZATION="):
-                old_quant = line.split("=")[1].strip()
-            elif line.startswith("EXTRA_ARGS="):
-                old_extra = line.split("=")[1].strip()
-
-    # 4. Solves Sizing Equations
-    # Model Weights Size in GB
-    weights_size_gb = (
-        model_spec["parameters"] * BYTES_PER_PARAM_BF16
-    ) * MEM_OVERHEAD_MULTIPLIER  # Including overhead margins
-
-    # Cache per token (in bytes)
-    # Cache = 2 * Layers * KV_Heads * Head_Dim * 2 bytes (BF16)
-    bytes_per_token = (
-        2
-        * model_spec["layers"]
-        * model_spec["kv_heads"]
-        * model_spec["head_dim"]
-        * BYTES_PER_ELEMENT_BF16
-    )
-
-    # Cache needed for peak concurrency workload (in GB)
-    cache_size_gb = (max_concurrency * max_output_len * bytes_per_token) / (1024**3)
-
-    print("=== Workload Analysis ===")
-    print(f"Workload Profile: {os.path.basename(args.perf_yaml)}")
-    print(f"Target Strategy: {args.strategy}")
-    print(f"Target Model: {model_id}")
-    print(f"Max Concurrency: {max_concurrency}")
-    print(f"Max Output Length: {max_output_len} tokens")
-    print(f"Estimated Weights Size: {weights_size_gb:.2f} GB")
-    print(f"Estimated Cache Size Needed: {cache_size_gb:.2f} GB")
-
-    # Solve for TP
-    tp_size = 1
-    quantization = "null"
-    total_required_gb = weights_size_gb + cache_size_gb
-    usable_vram_capacity = vram_capacity_gb * gpu_memory_utilization
-
-    while tp_size * usable_vram_capacity < total_required_gb:
-        if tp_size < 8:
-            tp_size *= 2
+    tp, tr = 1, w_size + c_size
+    while tp * vram * accel_util < tr:
+        if tp < 8:
+            tp *= 2
         else:
-            print(
-                "\n[Error] Workload exceeds capacity limits even with max TP size of 8.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            sys.exit("Err: Exceeds capacity with TP 8.")
 
-    print("\n=== Sizing Recommendation ===")
-    print(f"Recommended TENSOR_PARALLEL_SIZE: {tp_size}")
-    print(f"Quantization: {quantization}")
-
-    # Calculate Max Model Len (Upper limit safe bounds)
-    # Max model len can fit within remaining VRAM
-    available_cache_gb = (
-        tp_size * vram_capacity_gb * gpu_memory_utilization
-    ) - weights_size_gb
-    max_safe_len = int(
-        (available_cache_gb * (1024**3)) / (max_concurrency * bytes_per_token)
+    avail_c = (tp * vram * accel_util) - w_size
+    max_len = max(
+        min(int((avail_c * (1024**3)) / (max_c * bpt)), 32768), max_out + 1024
     )
-    # Cap to model limits
-    max_safe_len = min(max_safe_len, 32768)
+    extra = f'--enable-chunked-prefill={"True" if max_out > args.chunked_prefill_threshold else "False"}'
 
-    # Ensure it's at least greater than output tokens
-    max_safe_len = max(max_safe_len, max_output_len + 1024)
-    print(f"Calculated MAX_MODEL_LEN Limit: {max_safe_len}")
-
-    # Determine Chunked Prefill setting (Recommended for context volumes)
-    enable_chunked_prefill = "False"
-    if max_output_len > args.chunked_prefill_threshold:
-        enable_chunked_prefill = "True"
-
-    print("\n=== Configuration Gap Analysis ===")
-
-    # B. Analyze patch-resources.yaml
-    resource_file = os.path.join(overlay_path, "patch-resources.yaml")
-    old_resources_limit = "unknown"
-    if os.path.exists(resource_file):
-        with open(resource_file, "r") as f:
-            res_data = yaml.safe_load(f)
-        limit_key = "nvidia.com/gpu" if platform_prefix == "gpu" else "google.com/tpu"
-        val = get_nested(
-            res_data,
-            [
-                "spec",
-                "template",
-                "spec",
-                "containers",
-                0,
-                "resources",
-                "limits",
-                limit_key,
-            ],
-        )
-        if val is not None:
-            old_resources_limit = val
-
-    # C. Analyze patch-nodeselector.yaml
-    nodeselector_file = os.path.join(overlay_path, "patch-nodeselector.yaml")
-    old_node_selector_val = "unknown"
-    if os.path.exists(nodeselector_file):
-        with open(nodeselector_file, "r") as f:
-            node_data = yaml.safe_load(f)
-        selector_key = (
-            "cloud.google.com/gke-gpu-count"
-            if platform_prefix == "gpu"
-            else "cloud.google.com/compute-class"
-        )
-        val = get_nested(
-            node_data, ["spec", "template", "spec", "nodeSelector", selector_key]
-        )
-        if val is not None:
-            old_node_selector_val = val
-
-    # Print analysis details
-    print(f"runtime.env:")
-    print(f"  * TENSOR_PARALLEL_SIZE: current={old_tp}, required={tp_size}")
-    print(f"  * MAX_MODEL_LEN: current={old_mml}, required={max_safe_len}")
-    gmu_current_str = (
-        f"{old_gpu_mem_util} (default fallback {DEFAULT_GPU_MEMORY_UTILIZATION} applied)"
-        if old_gpu_mem_util == "unknown"
-        else old_gpu_mem_util
+    res_f, node_f = f"{ovl}/patch-resources.yaml", f"{ovl}/patch-nodeselector.yaml"
+    res_d = yaml.safe_load(open(res_f)) if os.path.exists(res_f) else {}
+    node_d = yaml.safe_load(open(node_f)) if os.path.exists(node_f) else {}
+    l_k = "nvidia.com/gpu" if pfx == "gpu" else "google.com/tpu"
+    n_k = (
+        "cloud.google.com/gke-gpu-count"
+        if pfx == "gpu"
+        else "cloud.google.com/compute-class"
     )
+
+    old_res = get_n(
+        res_d, ["spec", "template", "spec", "containers", 0, "resources", "limits", l_k]
+    )
+    old_node = get_n(node_d, ["spec", "template", "spec", "nodeSelector", n_k])
+    tpu_c = "tpu-v6e-2x2" if tp == 4 else ("tpu-v6e-2x4" if tp == 8 else None)
+    s_val = str(tp) if pfx == "gpu" else tpu_c
+
+    gaps = [
+        ("TENSOR_PARALLEL_SIZE", env.get("TENSOR_PARALLEL_SIZE", "unknown"), tp),
+        ("MAX_MODEL_LEN", env.get("MAX_MODEL_LEN", "unknown"), max_len),
+        (
+            "GPU_MEMORY_UTILIZATION",
+            env.get("GPU_MEMORY_UTILIZATION", "unknown"),
+            accel_util,
+        ),
+        ("QUANTIZATION", env.get("QUANTIZATION", "unknown"), "null"),
+        ("EXTRA_ARGS", env.get("EXTRA_ARGS", "unknown").replace('"', ""), extra),
+        ("resources limits", old_res, tp),
+        ("nodeSelector", old_node, s_val),
+    ]
+
     print(
-        f"  * GPU_MEMORY_UTILIZATION: current={gmu_current_str}, required={gpu_memory_utilization}"
+        f"\nProfile: {args.perf_yaml}\nSpec: {args.spec}\nModel: {args.model}\nConcurrency: {max_c}\nOutput: {max_out}\nWeights: {w_size:.2f}GB\nCache: {c_size:.2f}GB"
     )
-    print(f"  * QUANTIZATION: current={old_quant}, required={quantization}")
-    recommended_extra = f"--enable-chunked-prefill={enable_chunked_prefill}"
-    print(f'  * EXTRA_ARGS: current={old_extra}, required="{recommended_extra}"')
+    for n, c, r in gaps:
+        print(f"{n}: curr={c}, req={r}")
 
-    print(f"\npatch-resources.yaml:")
-    print(f"  * resource limits: current={old_resources_limit}, required={tp_size}")
-
-    print(f"\npatch-nodeselector.yaml:")
-    tpu_class = (
-        "tpu-v6e-2x2" if tp_size == 4 else ("tpu-v6e-2x4" if tp_size == 8 else None)
-    )
-    if platform_prefix == "gpu":
-        print(
-            f"  * cloud.google.com/gke-gpu-count: current={old_node_selector_val}, required={tp_size}"
+    needs_up = any(str(c) != str(r) for _, c, r in gaps)
+    if needs_up and args.apply:
+        env.update(
+            {
+                "TENSOR_PARALLEL_SIZE": str(tp),
+                "MAX_MODEL_LEN": str(max_len),
+                "GPU_MEMORY_UTILIZATION": str(accel_util),
+                "QUANTIZATION": "null",
+                "EXTRA_ARGS": f'"{extra}"',
+            }
         )
-    elif platform_prefix == "tpu":
-        print(
-            f"  * cloud.google.com/compute-class: current={old_node_selector_val}, required={tpu_class}"
+        sv_env(env_f, env)
+        patch_yaml(
+            res_f,
+            ["spec", "template", "spec", "containers", 0, "resources", "limits", l_k],
+            tp,
         )
-
-    # Propose update status
-    needs_update = False
-    if (
-        str(old_tp) != str(tp_size)
-        or str(old_mml) != str(max_safe_len)
-        or str(old_gpu_mem_util) != str(gpu_memory_utilization)
-        or str(old_quant) != str(quantization)
-        or str(old_extra) != f'"{recommended_extra}"'
-    ):
-        needs_update = True
-    if str(old_resources_limit) != str(tp_size):
-        needs_update = True
-    if platform_prefix == "gpu" and str(old_node_selector_val) != str(tp_size):
-        needs_update = True
-    elif platform_prefix == "tpu" and str(old_node_selector_val) != str(tpu_class):
-        needs_update = True
-
-    if needs_update:
-        print("\n[Status] Gaps identified. Updates are proposed above.")
-        if not args.apply:
-            print(
-                "Run with --apply to apply these changes directly to the overlay manifests."
-            )
-    else:
-        print("\n[Status] No gaps identified. The target files are already optimized.")
-
-    # 5. Apply Updates (Writes files only if --apply is set)
-    if args.apply and needs_update:
-        print("\n=== Applying Proposed Updates ===")
-        # A. Write runtime.env
-        if os.path.exists(env_file):
-            new_lines = []
-            has_tp = False
-            has_mml = False
-            has_gmu = False
-            has_quant = False
-            has_extra = False
-            for line in lines:
-                if line.startswith("TENSOR_PARALLEL_SIZE="):
-                    new_lines.append(f"TENSOR_PARALLEL_SIZE={tp_size}\n")
-                    has_tp = True
-                elif line.startswith("MAX_MODEL_LEN="):
-                    new_lines.append(f"MAX_MODEL_LEN={max_safe_len}\n")
-                    has_mml = True
-                elif line.startswith("GPU_MEMORY_UTILIZATION="):
-                    new_lines.append(
-                        f"GPU_MEMORY_UTILIZATION={gpu_memory_utilization}\n"
-                    )
-                    has_gmu = True
-                elif line.startswith("QUANTIZATION="):
-                    new_lines.append(f"QUANTIZATION={quantization}\n")
-                    has_quant = True
-                elif line.startswith("EXTRA_ARGS="):
-                    new_lines.append(f'EXTRA_ARGS="{recommended_extra}"\n')
-                    has_extra = True
-                else:
-                    new_lines.append(line)
-            # Append missing keys
-            if not has_tp:
-                new_lines.append(f"TENSOR_PARALLEL_SIZE={tp_size}\n")
-            if not has_mml:
-                new_lines.append(f"MAX_MODEL_LEN={max_safe_len}\n")
-            if not has_gmu:
-                new_lines.append(f"GPU_MEMORY_UTILIZATION={gpu_memory_utilization}\n")
-            if not has_quant:
-                new_lines.append(f"QUANTIZATION={quantization}\n")
-            if not has_extra:
-                new_lines.append(f'EXTRA_ARGS="{recommended_extra}"\n')
-
-            with open(env_file, "w") as f:
-                f.writelines(new_lines)
-            print(f"Updated runtime environment variables in {env_file}")
-
-        # B. Write patch-resources.yaml
-        if os.path.exists(resource_file):
-            try:
-                with open(resource_file, "r") as f:
-                    res_data = yaml.safe_load(f)
-                limit_key = (
-                    "nvidia.com/gpu" if platform_prefix == "gpu" else "google.com/tpu"
-                )
-                set_nested(
-                    res_data,
-                    [
-                        "spec",
-                        "template",
-                        "spec",
-                        "containers",
-                        0,
-                        "resources",
-                        "limits",
-                        limit_key,
-                    ],
-                    str(tp_size),
-                )
-
-                req_path = [
+        if get_n(
+            res_d,
+            ["spec", "template", "spec", "containers", 0, "resources", "requests", l_k],
+            None,
+        ):
+            patch_yaml(
+                res_f,
+                [
                     "spec",
                     "template",
                     "spec",
@@ -474,41 +215,14 @@ def main():
                     0,
                     "resources",
                     "requests",
-                    limit_key,
-                ]
-                if get_nested(res_data, req_path) is not None:
-                    set_nested(res_data, req_path, str(tp_size))
-
-                with open(resource_file, "w") as f:
-                    yaml.dump(res_data, f, default_flow_style=False)
-                print(f"Updated resource limits in {resource_file} to {tp_size}")
-            except Exception as e:
-                print(f"Error: Failed to write to {resource_file}: {e}")
-
-        # C. Write patch-nodeselector.yaml
-        if os.path.exists(nodeselector_file):
-            try:
-                with open(nodeselector_file, "r") as f:
-                    node_data = yaml.safe_load(f)
-                selector_key = (
-                    "cloud.google.com/gke-gpu-count"
-                    if platform_prefix == "gpu"
-                    else "cloud.google.com/compute-class"
-                )
-                selector_val = str(tp_size) if platform_prefix == "gpu" else tpu_class
-                if selector_val:
-                    set_nested(
-                        node_data,
-                        ["spec", "template", "spec", "nodeSelector", selector_key],
-                        selector_val,
-                    )
-                with open(nodeselector_file, "w") as f:
-                    yaml.dump(node_data, f, default_flow_style=False)
-                print(f"Updated nodeSelector in {nodeselector_file}")
-            except Exception as e:
-                print(f"Error: Failed to write to {nodeselector_file}: {e}")
-
-    if needs_update and not args.apply:
+                    l_k,
+                ],
+                tp,
+            )
+        if s_val:
+            patch_yaml(node_f, ["spec", "template", "spec", "nodeSelector", n_k], s_val)
+        print("Updated manifests.")
+    elif needs_up:
         sys.exit(2)
 
 

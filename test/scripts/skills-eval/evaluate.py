@@ -137,6 +137,31 @@ for i, arg in enumerate(args):
 """,
     )
 
+    # Mock llmdbenchmark
+    write_mock_script(
+        "llmdbenchmark",
+        """
+import sys
+import os
+import json
+
+log_file = os.environ.get("MOCK_LOG_FILE")
+with open(log_file, "a") as f:
+    f.write(f"llmdbenchmark {' '.join(sys.argv[1:])}\\n")
+
+args = sys.argv[1:]
+for i, arg in enumerate(args):
+    if arg == "--output" and i + 1 < len(args):
+        out_file = args[i + 1]
+        if "results.json" in out_file or "report_v0.2.json" in out_file:
+            with open(out_file, "w") as f_out:
+                json.dump({"mock_key": "mock_value", "tokens": 1200, "duration_ms": 1000}, f_out)
+        elif "output.csv" in out_file:
+            with open(out_file, "w") as f_out:
+                f_out.write("metric,value\\nthroughput,15.5\\n")
+""",
+    )
+
 
 def clean_outputs():
     """Removes any generated output files to prevent cross-contamination."""
@@ -266,86 +291,27 @@ def check_assertion(assertion_str, stdout, stderr):
                 return True, "Verified curl command to v1/models was executed"
         return False, "curl command to v1/models not found in calls log"
 
-    elif "output report report_v0.2.json is generated" in assertion_lower:
-        if os.path.exists("report_v0.2.json"):
-            return True, "Found report_v0.2.json generated"
-        return False, "report_v0.2.json was not generated"
+    # Generic File Upload and Generation Checks
+    file_gen_match = re.search(
+        r"([a-zA-Z0-9_\.]+\.(?:json|csv)) is generated|collected into ([a-zA-Z0-9_\.]+\.(?:json|csv))",
+        assertion_lower,
+    )
+    if file_gen_match:
+        f = file_gen_match.group(1) or file_gen_match.group(2)
+        return os.path.exists(f), f"File {f} generation check"
 
-    elif "dcgm metrics are collected into dcgm_metrics.json" in assertion_lower:
-        if os.path.exists("dcgm_metrics.json"):
-            return True, "Found dcgm_metrics.json generated"
-        return False, "dcgm_metrics.json was not generated"
-
-    elif "vllm_config.json is uploaded" in assertion_lower:
+    upload_match = re.search(
+        r"([a-zA-Z0-9_.\-]+) is uploaded using gcloud storage cp to (gs://[^\s'\"]+)",
+        assertion_str,
+    )
+    if upload_match:
+        f, dest = upload_match.groups()
         if os.path.exists(MOCK_LOG_FILE):
-            with open(MOCK_LOG_FILE, "r") as f:
-                calls = f.read()
-            if (
-                "gcloud storage cp vllm_config.json" in calls
-                and "gs://llm-d-benchmark/" in calls
-            ):
-                return (
-                    True,
-                    "vllm_config.json is uploaded using gcloud storage cp to gs://llm-d-benchmark/",
-                )
-        return (
-            False,
-            f"vllm_config.json was not uploaded to GCS. Calls: {calls if os.path.exists(MOCK_LOG_FILE) else 'None'}",
-        )
-
-    elif (
-        "report_v0.2.json is uploaded" in assertion_lower
-        or "report report_v0.2.json is uploaded" in assertion_lower
-    ):
-        if os.path.exists(MOCK_LOG_FILE):
-            with open(MOCK_LOG_FILE, "r") as f:
-                calls = f.read()
-            if (
-                "gcloud storage cp report_v0.2.json" in calls
-                and "gs://llm-d-benchmark/" in calls
-            ):
-                return (
-                    True,
-                    "The report report_v0.2.json is uploaded using gcloud storage cp to gs://llm-d-benchmark/",
-                )
-        return (
-            False,
-            f"report_v0.2.json was not uploaded to GCS. Calls: {calls if os.path.exists(MOCK_LOG_FILE) else 'None'}",
-        )
-
-    elif "dcgm_metrics.json is uploaded" in assertion_lower:
-        if os.path.exists(MOCK_LOG_FILE):
-            with open(MOCK_LOG_FILE, "r") as f:
-                calls = f.read()
-            if (
-                "gcloud storage cp dcgm_metrics.json" in calls
-                and "gs://llm-d-benchmark/" in calls
-            ):
-                return (
-                    True,
-                    "dcgm_metrics.json is uploaded using gcloud storage cp to gs://llm-d-benchmark/",
-                )
-        return (
-            False,
-            f"dcgm_metrics.json was not uploaded to GCS. Calls: {calls if os.path.exists(MOCK_LOG_FILE) else 'None'}",
-        )
-
-    elif "output.csv is uploaded" in assertion_lower:
-        if os.path.exists(MOCK_LOG_FILE):
-            with open(MOCK_LOG_FILE, "r") as f:
-                calls = f.read()
-            if (
-                "gcloud storage cp output.csv" in calls
-                and "gs://llm-d-benchmark/" in calls
-            ):
-                return (
-                    True,
-                    "output.csv is uploaded using gcloud storage cp to gs://llm-d-benchmark/",
-                )
-        return (
-            False,
-            f"output.csv was not uploaded to GCS. Calls: {calls if os.path.exists(MOCK_LOG_FILE) else 'None'}",
-        )
+            with open(MOCK_LOG_FILE, "r") as log:
+                calls = log.read()
+            if "gcloud storage cp" in calls and f in calls and dest in calls:
+                return True, f"{f} uploaded to {dest}"
+        return False, f"{f} not uploaded to {dest}"
 
     elif "uploaded using gcloud storage cp" in assertion_lower:
         if os.path.exists(MOCK_LOG_FILE):
@@ -406,24 +372,13 @@ def check_assertion(assertion_str, stdout, stderr):
         if os.path.exists(MOCK_LOG_FILE):
             with open(MOCK_LOG_FILE, "r") as f:
                 calls = f.read()
-            if "llm-d bench run" in calls and "--dry-run" in calls:
-                return True, "llm-d bench run --dry-run was executed"
-        return False, "llm-d bench run --dry-run was not executed"
+            if (
+                "llm-d bench run" in calls or "llmdbenchmark run" in calls
+            ) and "--dry-run" in calls:
+                return True, "llmdbenchmark run --dry-run was executed"
+        return False, "llmdbenchmark run --dry-run was not executed"
 
-    elif "results.json is generated" in assertion_lower:
-        if os.path.exists("results.json"):
-            return True, "Found results.json generated"
-        return False, "results.json was not generated"
-
-    elif "vllm_config.json is generated" in assertion_lower:
-        if os.path.exists("vllm_config.json"):
-            return True, "Found vllm_config.json generated"
-        return False, "vllm_config.json was not generated"
-
-    elif "final output csv output.csv is extracted" in assertion_lower:
-        if os.path.exists("output.csv"):
-            return True, "Found output.csv generated"
-        return False, "output.csv was not generated"
+    # Handled by generic file generation check above
 
     elif "gcloud config get-value account was executed" in assertion_lower:
         if os.path.exists(MOCK_LOG_FILE):
@@ -434,7 +389,7 @@ def check_assertion(assertion_str, stdout, stderr):
         return False, "gcloud config get-value account was not executed"
 
     elif "tune_workload.py script is invoked" in assertion_lower:
-        if "Target Model:" in stdout or "Estimated Weights Size:" in stdout:
+        if "Model:" in stdout or "Weights:" in stdout:
             return (
                 True,
                 "Verified tune_workload.py invocation arguments structured correctly",
@@ -442,7 +397,7 @@ def check_assertion(assertion_str, stdout, stderr):
         return False, f"tune_workload.py did not run correctly. Stdout: {stdout}"
 
     elif "recommended tensor_parallel_size is calculated" in assertion_lower:
-        if "Recommended TENSOR_PARALLEL_SIZE:" in stdout:
+        if "TENSOR_PARALLEL_SIZE:" in stdout:
             return True, "Recommended TENSOR_PARALLEL_SIZE is calculated and printed"
         return False, "Recommended TENSOR_PARALLEL_SIZE not found in output"
 
@@ -489,7 +444,7 @@ def check_assertion(assertion_str, stdout, stderr):
         "tensor_parallel_size limit is kept within the capacity threshold"
         in assertion_lower
     ):
-        match = re.search(r"Recommended TENSOR_PARALLEL_SIZE:\s*(\d+)", stdout)
+        match = re.search(r"TENSOR_PARALLEL_SIZE:.*req=(\d+)", stdout)
         if match:
             tp = int(match.group(1))
             if tp <= 8:
@@ -566,13 +521,17 @@ def run_test_case(skill_name, case, mock_mode):
             workload = "chatbot_synthetic.yaml"
             if "sanity_random.yaml" in case["prompt"]:
                 workload = "sanity_random.yaml"
+            bucket_match = re.search(r"GCS results bucket '([^']+)'", case["prompt"])
+            cmd = [
+                "bash",
+                "skills/llm-d-benchmarking/scripts/run_benchmark.sh",
+                workload,
+                "http://vllm-eval:8000",
+            ]
+            if bucket_match:
+                cmd.extend(["default", "google/gemma-4-31b-it", bucket_match.group(1)])
             res = subprocess.run(
-                [
-                    "bash",
-                    "skills/llm-d-benchmarking/scripts/run_benchmark.sh",
-                    workload,
-                    "http://vllm-eval:8000",
-                ],
+                cmd,
                 capture_output=True,
                 text=True,
                 env=env,
@@ -595,7 +554,7 @@ def run_test_case(skill_name, case, mock_mode):
                         temp_workload_path,
                         "--accelerator-type",
                         "rtx-pro-6000",
-                        "--strategy",
+                        "--spec",
                         "precise-prefix-cache-routing",
                         "--apply",
                     ],
@@ -620,7 +579,7 @@ def run_test_case(skill_name, case, mock_mode):
                         temp_perf_path,
                         "--accelerator-type",
                         "v6e",
-                        "--strategy",
+                        "--spec",
                         "optimized-baseline",
                         "--apply",
                     ],
@@ -654,7 +613,7 @@ def run_test_case(skill_name, case, mock_mode):
                         temp_perf_path,
                         "--accelerator-type",
                         "rtx-pro-6000",
-                        "--strategy",
+                        "--spec",
                         "precise-prefix-cache-routing",
                     ],
                     capture_output=True,
