@@ -108,6 +108,10 @@ variable "llmd_accelerator_type" {
   default = "nvidia-l4"
   type    = string
 
+  # This variable shares a name with the one declared in
+  # examples/llmd/_shared_config/llmd-shared_variables.tf, so a single
+  # TF_VAR_llmd_accelerator_type must satisfy both validation rules. The values
+  # accepted by the well-lit path guides are included here for that reason.
   validation {
     condition = contains(
       [
@@ -116,6 +120,10 @@ variable "llmd_accelerator_type" {
         "nvidia-l4",
         "nvidia-rtx-pro",
         "nvidia-tesla-a100",
+        "h100",
+        "h200",
+        "rtx-pro-6000",
+        "v6e",
       ],
       var.llmd_accelerator_type
     )
