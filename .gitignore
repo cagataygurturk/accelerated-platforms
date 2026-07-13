@@ -46,3 +46,5 @@ k6-*.txt
 k6-*.csv
 k6-*.jsonl
 k6-report.md
+workspaces
+**/*/backend.tf

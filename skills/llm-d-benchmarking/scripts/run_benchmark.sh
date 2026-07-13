@@ -88,8 +88,19 @@ collect_dcgm() {
 
 # Phase 1: Setup Namespace & PVC
 llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" $WORKLOAD_ARG --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --workspace "$WORKSPACE_DIR" --dry-run
-llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" $WORKLOAD_ARG --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --workspace "$WORKSPACE_DIR" -s 0,1
-kubectl delete pod access-to-harness-data-workload-pvc -n "$NAMESPACE" --ignore-not-found --grace-period=0 --force
+# Steps 2-6 create the namespace, the inference-perf-runner ServiceAccount/RBAC
+# and the workload PVC. Without them step 7 fails with
+# 'serviceaccount "inference-perf-runner" not found'.
+# The data-access pod pulls a ~3GB image, which exceeds the 120s default wait on
+# a cold node.
+llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" $WORKLOAD_ARG --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --workspace "$WORKSPACE_DIR" --data-access-timeout "${DATA_ACCESS_TIMEOUT:-900}" -s 0,1,2,3,4,5,6
+# NOTE: the data-access pod is deliberately NOT deleted here. Step 7 stages the
+# workload profile onto the PVC through it and collects the results from it
+# afterwards; deleting it leaves the harness with no config file (it dies with
+# FileNotFoundError on <experiment>/<workload>.yaml while llmdbenchmark still
+# reports "Run complete" and produces an empty results directory).
+# This requires a ReadWriteMany workload PVC -- see the storage class note in
+# SKILL.MD -- so that the harness pod can mount it from its own node.
 
 # Phase 2: Execute Benchmark Harness
 BENCHMARK_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -98,13 +109,14 @@ BENCHMARK_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 collect_dcgm "$NAMESPACE" "$BENCHMARK_START_TIME" "$BENCHMARK_END_TIME"
 
 # Phase 3: Result Retrieval & Cleanup
-kubectl apply -n "$NAMESPACE" -f skills/llm-d-benchmarking/scripts/helper-pods/data-access.yaml
-kubectl wait --for=condition=Ready pod/access-to-harness-data-workload-pvc -n "$NAMESPACE" --timeout=120s
-llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" -s 8 --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --harness inference-perf --workspace "$WORKSPACE_DIR"
+kubectl apply -n "$NAMESPACE" -f "${REPO_DIR}/skills/llm-d-benchmarking/scripts/helper-pods/data-access.yaml"
+kubectl wait --for=condition=Ready pod/access-to-harness-data-workload-pvc -n "$NAMESPACE" --timeout="${DATA_ACCESS_TIMEOUT:-900}s"
+# Step 9 is collect_results; step 8 is wait_completion and gathers nothing.
+llmdbenchmark run --base-dir "$LLMDBENCH_BASE_DIR" --spec "guides/${SPEC}" -s 9 --model "$MODEL_NAME" --endpoint-url "$ENDPOINT_URL" --namespace "$NAMESPACE" --harness inference-perf --workspace "$WORKSPACE_DIR"
 
 # Phase 4: Report Generation & Archival
 RESULTS_DIR=$(ls -td "$WORKSPACE_DIR"/*/results/inference-perf-* 2>/dev/null | head -n 1 || true)
-[ -z "$RESULTS_DIR" ] && exit 1
+[ -z "$RESULTS_DIR" ] && { echo "ERROR: no results under $WORKSPACE_DIR -- the harness produced no metrics. Check the harness pod logs." >&2; exit 1; }
 cp "$RESULTS_DIR/summary_lifecycle_metrics.json" ./results.json
 python3 -c "from llmdbenchmark.analysis.benchmark_report.native_to_br0_2 import import_inference_perf; import_inference_perf('./results.json').export_json('./report_v0.2.json')"
 python3 "${REPO_DIR}/skills/llm-d-benchmarking/scripts/extract_csv.py" --input report_v0.2.json --output output.csv
