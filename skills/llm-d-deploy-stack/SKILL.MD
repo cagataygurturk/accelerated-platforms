@@ -1,8 +1,8 @@
 ---
 name: llm-d-deploy-stack
-description: Deploys the llm-d benchmarking stack on GKE using well-lit paths.
+description: Deploys the llm-d stack on GKE using well-lit paths specification.
 version: 0.3.1
-allowed-tools: kubectl gcloud helm kustomize curl cat source
+allowed-tools: kubectl gcloud helm kustomize curl cat terraform python3
 mcp-servers:
   - kubernetes:
       reason: "Inspect cluster info, custom compute classes, pod statuses, and secrets."
@@ -13,6 +13,16 @@ mcp-servers:
 # Deploy llm-d Stack Skill
 
 Follow these instructions to deploy the llm-d benchmarking stack on GKE.
+
+## Terminology & Variables
+
+This skill utilizes the following core variables:
+
+- `SPEC` (also referred to as `strategy` or `guide`): This represents the name of the `llm-d` well-lit path guide being targeted. It maps directly to GKE overlay folder structures (`llmd-<spec>`)
+  - **Allowed Values:**
+    - `optimized-baseline` (Standard optimized baseline configuration).
+    - `precise-prefix-cache-routing` (Includes precise cache routing for multi-turn workloads).
+    - `predicted-latency-routing` (Includes dynamic latency-based routing overlays).
 
 ## 1. Prerequisites & Cluster Setup
 
@@ -80,20 +90,19 @@ Follow these instructions to deploy the llm-d benchmarking stack on GKE.
 4.  **Run validation**:
     - Execute the configuration and validation script to verify custom compute classes and overlay structure:
       ```bash
-      HF_MODEL_ID="<chosen_model>" ACCELERATOR_TYPE="<chosen_accelerator>" DEPLOYMENT_STRATEGY="<strategy>" MODEL_SERVER="vllm" "${ACP_REPO_DIR}/skills/llm-d-deploy-stack/scripts/configure_and_validate.sh"
+      HF_MODEL_ID="<chosen_model>" ACCELERATOR_TYPE="<chosen_accelerator>" SPEC="<spec>" MODEL_SERVER="vllm" "${ACP_REPO_DIR}/skills/llm-d-deploy-stack/scripts/configure_and_validate.sh"
       ```
-      _(Note: Map the chosen guide to DEPLOYMENT_STRATEGY: `optimized-baseline`, `precise-prefix-cache-routing`, or `predicted-latency-routing`. MODEL_SERVER specifies the engine, e.g., `vllm`)._
+      _(Note: Map the chosen guide to SPEC: `optimized-baseline`, `precise-prefix-cache-routing`, or `predicted-latency-routing`. MODEL_SERVER specifies the engine, e.g., `vllm`)._
 
 ## 4. Hugging Face Token Setup
 
-1.  **Source environment variables**:
-    ```bash
-    source "platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/_shared_config/scripts/set_environment_variables.sh"
-    ```
-2.  **Instruct the user** to add their Hugging Face Read Token to Google Secret Manager and as a Kubernetes secret:
-    Provide them with these commands, replacing `<YOUR_HUGGINGFACE_READ_TOKEN>` with their actual token:
+1.  **Instruct the user** to add their Hugging Face Read Token to Google Secret Manager and as a Kubernetes secret:
+    Provide them with these commands, replacing `<YOUR_HUGGINGFACE_READ_TOKEN>` with their actual token. Note that the `source` command must be run in the same shell session as the subsequent commands so the environment variables are preserved:
 
     ```bash
+    # Source environment variables
+    source "platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/_shared_config/scripts/set_environment_variables.sh"
+
     # Add to Secret Manager
     HF_TOKEN_READ=<YOUR_HUGGINGFACE_READ_TOKEN>
     echo ${HF_TOKEN_READ} | gcloud secrets versions add ${huggingface_hub_access_token_read_secret_manager_secret_name} --data-file=- --project=${huggingface_secret_manager_project_id}
@@ -102,7 +111,7 @@ Follow these instructions to deploy the llm-d benchmarking stack on GKE.
     kubectl -n ${llmd_namespace} create secret generic llm-d-hf-token --from-literal=HF_TOKEN="${HF_TOKEN_READ}"
     ```
 
-3.  **WAIT**: Stop calling tools and ask the user to confirm once they have run these commands. Do not proceed until the user confirms.
+2.  **WAIT**: Stop calling tools and ask the user to confirm once they add the HF token to secret manager and kubernetes secret Do not proceed until the user confirms.
 
 ## 5. Deploy Model Download Job & Model Server
 
@@ -130,11 +139,11 @@ Once the user confirms the token is configured, proceed with the deployment:
     - Configure the model server (run the script for GPU or TPU as indicated by the chosen accelerator):
       - If GPU:
         ```bash
-        "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-gpu/llmd-<strategy>/vllm/configure_vllm.sh"
+        "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-gpu/llmd-<spec>/vllm/configure_vllm.sh"
         ```
       - If TPU:
         ```bash
-        "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-tpu/llmd-<strategy>/vllm/configure_vllm.sh"
+        "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-tpu/llmd-<spec>/vllm/configure_vllm.sh"
         ```
     - Deploy using the overlay directory (obtained from `configure_and_validate.sh` output):
       ```bash
@@ -143,12 +152,15 @@ Once the user confirms the token is configured, proceed with the deployment:
 
 ## 6. Verification
 
-- Check that all pods are running and services are accessible.
+- Check that all pods are running and services are accessible. (Note: You may need to source the environment variables script first to get `$llmd_namespace`):
   ```bash
-  kubectl get pods -n $NAMESPACE
+  source "platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/_shared_config/scripts/set_environment_variables.sh"
+  kubectl get pods -n ${llmd_namespace}
+  kubectl get svc -n ${llmd_namespace}
   ```
 - Ensure the Hugging Face token is securely configured:
   ```bash
-  kubectl describe secretProviderClass huggingface-tokens -n $NAMESPACE
-  kubectl describe secret llm-d-hf-token -n $NAMESPACE
+  source "platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/_shared_config/scripts/set_environment_variables.sh"
+  kubectl describe secretProviderClass huggingface-tokens -n ${llmd_namespace}
+  kubectl describe secret llm-d-hf-token -n ${llmd_namespace}
   ```

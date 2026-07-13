@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,23 +27,25 @@ echo "Available accelerators (examples): nvidia-h100, nvidia-h200, rtx-pro-6000,
 
 MODEL=${HF_MODEL_ID:-"google/gemma-4-31b-it"}
 ACCELERATOR=${ACCELERATOR_TYPE:-"rtx-pro-6000"}
-DEPLOYMENT_STRATEGY=${DEPLOYMENT_STRATEGY:-"optimized-baseline"}
+SPEC=${SPEC:-${DEPLOYMENT_STRATEGY:-"optimized-baseline"}}
 MODEL_SERVER=${MODEL_SERVER:-"vllm"}
 
 echo "Selected Model: $MODEL"
 echo "Selected Accelerator: $ACCELERATOR"
-echo "Deployment Strategy (Well-Lit Path): $DEPLOYMENT_STRATEGY"
+echo "Deployment Spec (Well-Lit Path): $SPEC"
 echo "Model Server (Engine): $MODEL_SERVER"
 
 echo "Checking for custom compute class for $ACCELERATOR..."
 # This command lists compute classes, we should check if one matches our accelerator.
 kubectl get customcomputeclasses
 
-# Example check (naive):
-if kubectl get customcomputeclasses | grep -q "$ACCELERATOR"; then
+# Normalize accelerator naming (strip prefixes like nvidia-, google-tpu-, tpu-)
+normalized_accel=$(echo "$ACCELERATOR" | sed -E 's/^(nvidia-|google-tpu-|tpu-)//')
+
+if kubectl get customcomputeclasses | grep -E -q "(${ACCELERATOR}|${normalized_accel})"; then
     echo "Valid custom compute class found."
 else
-    echo "Warning: No custom compute class explicitly matching $ACCELERATOR found. Please ensure it exists."
+    echo "Warning: No custom compute class matching '$ACCELERATOR' or '$normalized_accel' found. Please ensure it exists."
 fi
 
 # Determine directory prefix from accelerator
@@ -75,11 +77,11 @@ if [ "$SUFFIX" = "custom" ]; then
 fi
 
 
-# Resolve overlay path based on platform, strategy, and model server
+# Resolve overlay path based on platform, spec, and model server
 if [ "$PREFIX" = "v6e" ]; then
-    OVERLAY_DIR="${REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-tpu/llmd-${DEPLOYMENT_STRATEGY}/${MODEL_SERVER}/${PREFIX}-${SUFFIX}"
+    OVERLAY_DIR="${REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-tpu/llmd-${SPEC}/${MODEL_SERVER}/${PREFIX}-${SUFFIX}"
 else
-    OVERLAY_DIR="${REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-gpu/llmd-${DEPLOYMENT_STRATEGY}/${MODEL_SERVER}/${PREFIX}-${SUFFIX}"
+    OVERLAY_DIR="${REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/kubernetes-manifests/online-inference-gpu/llmd-${SPEC}/${MODEL_SERVER}/${PREFIX}-${SUFFIX}"
 fi
 
 echo "=== Overlay Instructions ==="
@@ -88,7 +90,7 @@ if [ -d "$OVERLAY_DIR" ]; then
     echo "The final vLLM arguments are configured to use --model $MODEL"
 else
     echo "ERROR: Overlay directory not found: $OVERLAY_DIR" >&2
-    echo "Please ensure the model and accelerator combination is supported for the chosen strategy." >&2
+    echo "Please ensure the model and accelerator combination is supported for the chosen spec." >&2
     exit 1
 fi
 

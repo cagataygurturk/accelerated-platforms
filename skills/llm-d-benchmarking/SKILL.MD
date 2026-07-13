@@ -2,7 +2,7 @@
 name: llm-d-benchmarking
 description: Benchmarks a deployed llm-d well-lit path guide stack on GKE using llm-d-benchmark cli with inference-perf as the harness, the user a will select the appropriate  workload profiles from llm-d-benchmark. 
 version: 0.1.0
-allowed-tools: python3 kubectl gcloud
+allowed-tools: python3 kubectl gcloud llmdbenchmark curl
 mcp-servers: []
 dependencies:
   - kubernetes:
@@ -15,7 +15,15 @@ dependencies:
 
 Follow these instructions to run benchmarks against a deployed llm-d stack.
 
-## 1. Prerequisites
+## 1. Terminology & Variables
+
+This skill utilizes the following core variables:
+
+- `SPEC` (passed via `SPEC` environment variable, previously `DEPLOYMENT_STRATEGY`): The name of the `llm-d` well-lit path guide targeted (e.g., `optimized-baseline`, `precise-prefix-cache-routing`, `predicted-latency-routing`). It defines which GKE manifest subdirectory is active.
+- `Workload Profile`: The load-test profile configuration (e.g., `chatbot_synthetic.yaml`, `agentic_code_generation.yaml`) chosen to run.
+- `RESULTS_BUCKET` (passed via `RESULTS_BUCKET` environment variable or CLI argument). If not specified, it dynamically defaults to `inf-<platform_name>-bench-results` (resolving the platform name from tfvars) in the same region as the platform.
+
+## 2. Prerequisites
 
 - **Clone `llm-d-benchmark` locally**: Ensure you have a local clone of the `llm-d-benchmark` repository.
   ```bash
@@ -27,12 +35,12 @@ Follow these instructions to run benchmarks against a deployed llm-d stack.
   # Install CLI dependencies (standard installation)
   curl -sSL https://raw.githubusercontent.com/llm-d/llm-d-benchmark/main/install.sh | bash
   ```
-  _Note: The `run_benchmark.sh` script assumes `llm-d` CLI is installed and available in the path._
+  _Note: The `run_benchmark.sh` script assumes the upstream `llmdbenchmark` package is installed and available in the python path._
 - The llm-d stack must be GKE deployed and running.
 - Determine the inference endpoint URL and the gateway class (e.g. `epp-only` or `istio`).
   - Refer to [Deploy Stack Skill](../llm-d-deploy-stack/SKILL.MD) for details.
 
-## 2. Select a Workload Profile
+## 3. Select a Workload Profile
 
 Ask the user to choose a workload profile from the table below, or input a custom one.
 
@@ -50,7 +58,7 @@ Ask the user to choose a workload profile from the table below, or input a custo
 
 _Note: For more profiles, refer to [llm-d-workload-profiles.md](../llm-d-workload-tuner/references/llm-d-workload-profiles.md)._
 
-## 3. Tune & Validate Workload (Optional/Experimental)
+## 4. Tune & Validate Workload (Optional/Experimental)
 
 Before running the benchmark, you can use the experimental `llm-d-workload-tuner` to check for optimal parameters or issues.
 You can run the tuner against the chosen workload profile template:
@@ -59,83 +67,84 @@ You can run the tuner against the chosen workload profile template:
 python3 "${ACP_REPO_DIR}/skills/llm-d-workload-tuner/scripts/tune_workload.py" \
   --perf-yaml <path_to_workload_profile_yaml> \
   --accelerator-type <accelerator_type> \
-  --strategy <strategy> \
+  --spec <spec> \
   --model <model_name>
 ```
 
 Example (for `chatbot_synthetic.yaml` and Gemma-4-31B on RTX 6000):
-_Note: You need to locate the profile template, typically under your `llm-d-benchmark` clone if available, or if you have a local copy. If you don't have a local copy, you might need to skip this step or use the default configs._
-If you have `llm-d-benchmark` repository cloned at `llm-d-benchmark`:
+\_Note: You need to locate the profile template, typically under your `llm-d-benchmark` clone if available
 
 ```bash
 python3 "${ACP_REPO_DIR}/skills/llm-d-workload-tuner/scripts/tune_workload.py" \
   --perf-yaml llm-d-benchmark/workload/profiles/inference-perf/chatbot_synthetic.yaml.in \
   --accelerator-type rtx-pro-6000 \
-  --strategy precise-prefix-cache-routing \
+  --spec precise-prefix-cache-routing \
   --model google/gemma-4-31b-it
 ```
 
-## 4. Run Benchmark
+## 5. Run Benchmark
 
 Run the consolidated benchmark script with the chosen workload profile and endpoint.
 
 ```bash
-"${ACP_REPO_DIR}/skills/llm-d-benchmarking/scripts/run_benchmark.sh" <workload_profile_name> <endpoint_url> [namespace] [model_name]
+"${ACP_REPO_DIR}/skills/llm-d-benchmarking/scripts/run_benchmark.sh" <workload_profile_name> <endpoint_url> [namespace] [model_name] [results_bucket]
 ```
 
 ### Examples:
 
-- Run chatbot benchmark:
+- Run chatbot benchmark with default bucket resolution:
 
   ```bash
   "${ACP_REPO_DIR}/skills/llm-d-benchmarking/scripts/run_benchmark.sh" chatbot_synthetic.yaml http://vllm-service:8000 default google/gemma-4-31b-it
   ```
 
-- Run code completion benchmark:
+- Run chatbot benchmark with explicit GCS bucket override:
   ```bash
-  "${ACP_REPO_DIR}/skills/llm-d-benchmarking/scripts/run_benchmark.sh" code_completion_synthetic.yaml http://vllm-service:8000 default google/gemma-4-31b-it
+  "${ACP_REPO_DIR}/skills/llm-d-benchmarking/scripts/run_benchmark.sh" chatbot_synthetic.yaml http://vllm-service:8000 default google/gemma-4-31b-it my-custom-bench-bucket
   ```
 
-## 5. Explanation of `run_benchmark.sh` Steps
+## 6. Explanation of `run_benchmark.sh` Steps
 
-The `run_benchmark.sh` script automates the execution of the benchmark through the following phases:
+The `run_benchmark.sh` script is an ultra-dense automated executor that directly calls the `llmdbenchmark` core library (bypassing CLI wrappers for user reproducibility). It automates the execution through the following condensed phases:
 
-1.  **IAM Validation & Prerequisites**:
-    - Prints the current GCP account.
-    - Performs a smoke check on the target endpoint using `curl` to verify availability.
-    - Verifies if Managed Prometheus is enabled on the GKE cluster to ensure metric collection.
-2.  **Workspace Setup**:
-    - Creates a unique timestamped workspace directory (e.g., `workspaces/run-YYYYMMDD-HHMMSS`) to hold all configurations and results.
-3.  **Dry Run**:
-    - Executes `llm-d bench run` with the `--dry-run` flag to validate the workload configuration syntax before deployment.
-4.  **Phase 1: Setup Namespace & PVC**:
-    - Deploys GKE base namespace resources, creates Persistent Volume Claims (PVC) for workload data, and spins up a temporary `data-access` helper pod.
-    - The `data-access` pod acts as a bridge to copy configuration files and datasets into the GKE PVC.
-    - Once the copy setup completes, the `data-access` pod is deleted to release the PVC lock (since GKE PVC storage is typically ReadWriteOnce), allowing the benchmark runner pod to mount it.
-5.  **Phase 2: Deploy & Run Harness**:
-    - Records the start time.
-    - Deploys the `llmdbench-harness-launcher` pod and starts the actual benchmark using the selected harness (defaulting to `inference-perf`).
-    - Blocks and waits for the benchmark run to finish.
-    - Records the end time.
-6.  **Telemetry Collection**:
-    - Deploys an in-cluster `telemetry-collector` pod.
-    - This pod queries GKE system metrics (`duty_cycle`, `memory_used`, `memory_total`) from Google Cloud Monitoring for the duration of the benchmark, filtered by the target namespace.
-    - Saves metrics to `dcgm_metrics.json`.
-7.  **Phase 3: Result Collection & Cleanup**:
-    - Re-deploys the `data-access` helper pod to mount the PVC again. This is necessary because it is RWO storage, and we need the helper pod to bridge and copy the result files out of the cluster.
-    - Runs the final `llm-d bench run` teardown steps (steps 8-11) to clean up harness resources.
-8.  **Report Generation & GCS Upload**:
-    - Copies raw metrics and summary files.
-    - Invokes `llm-d report generate` to compile the standard performance report (`report_v0.2.json`).
-    - Extracts key metrics into a flat CSV format (`output.csv`).
-    - Retrieves the running vLLM cluster deployment YAML state configuration (`vllm_config.json`).
-    - Uploads all report assets (`report_v0.2.json`, `vllm_config.json`, `dcgm_metrics.json`, `output.csv`) to the target GCS bucket.
+1.  **Dynamic Parameter Resolution & Bucket Provisioning**:
+    - Resolves GCP regions dynamically from environment variables, removing multi-regional fallbacks.
+    - Determines and enforces a GCS bucket (`inf-<platform_name>-bench-results`), auto-provisioning it via `gcloud storage` if missing.
+2.  **Pre-flight Checks & Workload Validation**:
+    - Checks if Managed Prometheus is enabled.
+    - Invokes `tune_workload.py` to check for optimal specs, allowing an interactive auto-apply fix if sizing gaps are found.
+3.  **Phase 1: Setup Namespace & PVC**:
+    - Executes `llmdbenchmark run` in `--dry-run` to validate syntax.
+    - Executes harness setup steps 0-6 to create namespace, PVC, and bridge data via temporary helper pods.
+4.  **Phase 2: Execute Benchmark Harness & Telemetry Collection**:
+    - Captures timestamps and runs the `inference-perf` harness in step 7.
+    - Triggers the `telemetry-collector.yaml` pod to capture GPU/TPU DCGM metrics from Cloud Monitoring concurrently.
+5.  **Phase 3 & 4: Result Retrieval, Cleanup, & Report Archival**:
+    - Restores the RWO PVC bridge pod to retrieve `inference-perf` results (steps 8-11).
+    - Uses `extract_csv.py` and inline python to synthesize `report_v0.2.json` and `output.csv`.
+    - Dumps the live vLLM config state and archives all artifacts (`dcgm_metrics.json`, reports) to the target GCS bucket, before deleting all helper pods.
 
-## 6. Analyzing Hardware Utilization
+## 7. Analyze Benchmark Results
+
+After running the benchmark, analyze the generated results using `inference-perf analyze`.
+
+```bash
+# Analyze the local results.json or downloaded report_v0.2.json
+inference-perf analyze <path_to_results.json>
+```
+
+When interpreting the output for the user, make sure to highlight:
+
+- **Performance by Stage & QPS**: Summarize Time to First Token (TTFT), Inter-Token Latency (ITL), and Queries Per Second (QPS).
+- **Throughput Metrics**: Highlight input and output token throughput (tokens/sec).
+- **HW Config & HPA**: Note the hardware configuration used and any Horizontal Pod Autoscaler scaling behaviors.
+- **Error Rate**: Explicitly point out the error rate and any failed requests.
+
+## 8. Analyzing Hardware Utilization
 
 To verify if your hardware (GPU or TPU) is fully utilized and healthy during the benchmark, monitor the metrics collected in `dcgm_metrics.json`.
 
-### 6.1 GPU (NVIDIA DCGM Metrics via Managed Prometheus)
+### 8.1 GPU (NVIDIA DCGM Metrics via Managed Prometheus)
 
 Monitor these metrics for GPU runs:
 
@@ -174,7 +183,7 @@ Monitor these metrics for GPU runs:
   - **Goal**: Detect clock throttling.
   - **Analysis**: If the clock frequency drops significantly under load, it indicates the GPU is throttling due to thermal limits or power constraints, affecting benchmark performance.
 
-### 6.2 TPU (GKE System Metrics)
+### 8.2 TPU (GKE System Metrics)
 
 Monitor these GKE system metrics for TPU runs (e.g., TPU v5e, v6e):
 
@@ -192,3 +201,22 @@ Monitor these GKE system metrics for TPU runs (e.g., TPU v5e, v6e):
 - **Metric**: `kubernetes.io/container/accelerator/memory_bandwidth_utilization`
   - **Goal**: Track HBM bandwidth utilization.
   - **Analysis**: High memory bandwidth utilization with low duty cycle indicates the workload is memory-bandwidth bound.
+
+## 9. Teardown Serving Stack
+
+You should tear down the serving stack to release cluster resources only when you are done with all the benchmarks.
+
+1. **Ask the user**: "Do you want to tear down the deployed serving stack? This will delete the vLLM server, gateway, and routing resources. (yes/no)"
+2. **If yes**, run the official teardown script corresponding to the chosen guide:
+   - For `optimized-baseline`:
+     ```bash
+     "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/teardown-llmd-optimized-baseline.sh"
+     ```
+   - For `precise-prefix-cache-routing`:
+     ```bash
+     "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/teardown-llmd-precise-prefix-cache-routing.sh"
+     ```
+   - For `predicted-latency-routing`:
+     ```bash
+     "${ACP_REPO_DIR}/platforms/gke/base/use-cases/inference-ref-arch/examples/llmd/teardown-llmd-predicted-latency-routing.sh"
+     ```
